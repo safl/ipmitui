@@ -1,0 +1,124 @@
+name: ci-cd
+
+# Single pipeline, modelled on safl/bty and safl/nosi. Everything lands
+# through PRs: lint + test run on every pull request and on pushes to
+# ``main``. On a green ``main`` build, ``tag-release`` creates the
+# ``v<version>`` tag from ``src/ipmitui/__init__.py`` (if it does not yet
+# exist); pushing that tag fires ``release``, which builds the wheel +
+# sdist and publishes a GitHub release.
+#
+# The tag is pushed with ``secrets.RELEASE_PAT`` (a fine-grained PAT with
+# ``contents: write``) rather than the default ``GITHUB_TOKEN``, because a
+# token-pushed tag does not trigger a new workflow run, so ``release``
+# would never fire.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-cd-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      # Runs the same hooks as a local ``git commit`` (ruff lint + format
+      # and the hygiene hooks in .pre-commit-config.yaml), over the tree.
+      - uses: pre-commit/action@v3.0.1
+
+  test:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+      # Editable install pulls in the runtime deps (rich, textual,
+      # tomli_w); pytest drives the hermetic suite (ipmitool is stubbed).
+      - run: pip install -e . pytest
+      - run: pytest -q tests/
+
+  build:
+    name: Build wheel + sdist
+    needs: [lint, test]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: pip install build
+      - run: python -m build
+      - uses: actions/upload-artifact@v5
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  # On a green ``main`` build, tag ``v<version>`` so ``release`` (which
+  # runs on the tag) fires. The tag is pushed with RELEASE_PAT (a
+  # GITHUB_TOKEN push would not trigger the tag workflow). When the
+  # secret is not set the job no-ops, so the pipeline stays green
+  # before releases are wired up.
+  tag-release:
+    needs: [lint, test, build]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Tag the version if it is new
+        env:
+          RELEASE_PAT: ${{ secrets.RELEASE_PAT }}
+        run: |
+          set -euo pipefail
+          if [ -z "${RELEASE_PAT:-}" ]; then
+            echo "RELEASE_PAT not set; skipping auto-tag (set it to enable releases)."
+            exit 0
+          fi
+          version=$(grep -m1 '^__version__ = ' src/ipmitui/__init__.py | sed 's/.*"\(.*\)".*/\1/')
+          test -n "$version" || { echo "could not read __version__"; exit 1; }
+          tag="v${version}"
+          if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
+            echo "${tag} already exists; nothing to do."
+            exit 0
+          fi
+          git tag "${tag}"
+          git push "https://x-access-token:${RELEASE_PAT}@github.com/${GITHUB_REPOSITORY}.git" "${tag}"
+          echo "Tagged ${tag}; the release job will publish it."
+
+  release:
+    name: Publish GitHub release
+    needs: [build]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          name: dist
+          path: dist/
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

@@ -1,0 +1,41 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ipmitui"
+dynamic = ["version"]
+description = "Small operator-side CLI + TUI for driving a rack of IPMI BMCs (status, SoL, power)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "BSD-3-Clause" }
+authors = [{ name = "Simon A. F. Lund", email = "os@safl.dk" }]
+keywords = ["ipmi", "bmc", "ipmitool", "lab", "operator"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: BSD License",
+    "Programming Language :: Python :: 3",
+    "Topic :: System :: Hardware",
+]
+dependencies = ["rich>=13", "textual>=0.85", "tomli_w>=1.0"]
+
+[project.urls]
+Homepage = "https://github.com/safl/ipmitui"
+
+[project.scripts]
+ipmitui = "ipmitui:main"
+
+[tool.hatch.version]
+path = "src/ipmitui/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ipmitui"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]
