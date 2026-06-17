@@ -4,8 +4,8 @@ name: ci-cd
 # lands through PRs: lint + test run on every pull request and on pushes to
 # ``main``. On a green ``main`` build, ``tag-release`` tags ``v<version>``
 # (from ``src/ipmitui/__init__.py``) if it does not exist yet; pushing that
-# tag fires ``release``, which attaches the wheel + sdist to a GitHub
-# release.
+# tag fires ``release`` (attach the wheel + sdist to a GitHub release)
+# and ``publish-pypi`` (Trusted Publishing to PyPI).
 #
 # The tag is pushed with ``secrets.RELEASE_PAT`` (a fine-grained PAT with
 # ``contents: write``), not the default ``GITHUB_TOKEN``: a GITHUB_TOKEN-
@@ -121,3 +121,25 @@ jobs:
           generate_release_notes: true
           fail_on_unmatched_files: true
           files: dist/*
+
+  # Publish to PyPI via Trusted Publishing (OIDC, no API token). Needs a
+  # publisher configured on PyPI for owner=safl, repo=ipmitui, workflow
+  # ci-cd.yml, environment ``pypi``. Runs strictly after the GitHub
+  # release; ``skip-existing`` keeps it idempotent on a retry.
+  publish-pypi:
+    needs: [release]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    environment:
+      name: pypi
+      url: https://pypi.org/p/ipmitui
+    permissions:
+      id-token: write  # OIDC for PyPI Trusted Publishing
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true
