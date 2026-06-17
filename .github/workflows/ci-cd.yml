@@ -1,16 +1,16 @@
 name: ci-cd
 
-# Single pipeline, modelled on safl/bty and safl/nosi. Everything lands
-# through PRs: lint + test run on every pull request and on pushes to
-# ``main``. On a green ``main`` build, ``tag-release`` creates the
-# ``v<version>`` tag from ``src/ipmitui/__init__.py`` (if it does not yet
-# exist); pushing that tag fires ``release``, which builds the wheel +
-# sdist and publishes a GitHub release.
+# Single pipeline, same shape as safl/bty and safl/withcache. Everything
+# lands through PRs: lint + test run on every pull request and on pushes to
+# ``main``. On a green ``main`` build, ``tag-release`` tags ``v<version>``
+# (from ``src/ipmitui/__init__.py``) if it does not exist yet; pushing that
+# tag fires ``release``, which attaches the wheel + sdist to a GitHub
+# release.
 #
 # The tag is pushed with ``secrets.RELEASE_PAT`` (a fine-grained PAT with
-# ``contents: write``) rather than the default ``GITHUB_TOKEN``, because a
-# token-pushed tag does not trigger a new workflow run, so ``release``
-# would never fire.
+# ``contents: write``), not the default ``GITHUB_TOKEN``: a GITHUB_TOKEN-
+# pushed tag does not trigger a new workflow run, so ``release`` would
+# never fire.
 
 on:
   pull_request:
@@ -30,13 +30,17 @@ jobs:
   lint:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      # Runs the same hooks as a local ``git commit`` (ruff lint + format
-      # and the hygiene hooks in .pre-commit-config.yaml), over the tree.
-      - uses: pre-commit/action@v3.0.1
+      # Run the same hooks as a local ``git commit`` (ruff lint + format
+      # and the hygiene hooks in .pre-commit-config.yaml) over the tree.
+      # Invoked directly rather than via pre-commit/action@v3.0.1, which
+      # pulls the Node 20 actions/cache@v4 and trips the deprecation
+      # warning.
+      - run: pip install pre-commit
+      - run: pre-commit run --all-files --show-diff-on-failure
 
   test:
     runs-on: ubuntu-24.04
@@ -45,7 +49,7 @@ jobs:
       matrix:
         python: ["3.11", "3.12", "3.13"]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python }}
@@ -59,23 +63,22 @@ jobs:
     needs: [lint, test]
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - run: pip install build
       - run: python -m build
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         with:
           name: dist
           path: dist/
           if-no-files-found: error
 
-  # On a green ``main`` build, tag ``v<version>`` so ``release`` (which
-  # runs on the tag) fires. The tag is pushed with RELEASE_PAT (a
-  # GITHUB_TOKEN push would not trigger the tag workflow). When the
-  # secret is not set the job no-ops, so the pipeline stays green
-  # before releases are wired up.
+  # On a green ``main`` build, tag ``v<version>`` so the publish job (which
+  # runs on the tag) fires. Gated on the full suite via ``needs`` so a red
+  # main never gets tagged. The tag is pushed with RELEASE_PAT because a
+  # GITHUB_TOKEN push would not trigger this workflow.
   tag-release:
     needs: [lint, test, build]
     if: github.ref == 'refs/heads/main'
@@ -83,19 +86,14 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+          token: ${{ secrets.RELEASE_PAT }}
       - name: Tag the version if it is new
-        env:
-          RELEASE_PAT: ${{ secrets.RELEASE_PAT }}
         run: |
           set -euo pipefail
-          if [ -z "${RELEASE_PAT:-}" ]; then
-            echo "RELEASE_PAT not set; skipping auto-tag (set it to enable releases)."
-            exit 0
-          fi
-          version=$(grep -m1 '^__version__ = ' src/ipmitui/__init__.py | sed 's/.*"\(.*\)".*/\1/')
+          version=$(sed -n 's/^__version__ = "\(.*\)"/\1/p' src/ipmitui/__init__.py)
           test -n "$version" || { echo "could not read __version__"; exit 1; }
           tag="v${version}"
           if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
@@ -103,22 +101,23 @@ jobs:
             exit 0
           fi
           git tag "${tag}"
-          git push "https://x-access-token:${RELEASE_PAT}@github.com/${GITHUB_REPOSITORY}.git" "${tag}"
-          echo "Tagged ${tag}; the release job will publish it."
+          git push origin "${tag}"
+          echo "Tagged ${tag}; ci-cd.yml will publish it."
 
+  # Create the GitHub release at the tag and attach the wheel + sdist.
   release:
-    name: Publish GitHub release
     needs: [build]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04
     permissions:
-      contents: write
+      contents: write  # softprops/action-gh-release creates the release
     steps:
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           name: dist
-          path: dist/
+          path: dist
       - uses: softprops/action-gh-release@v2
         with:
-          files: dist/*
           generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: dist/*
