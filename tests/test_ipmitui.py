@@ -62,9 +62,35 @@ user = "OTHER"
         )
         self.assertEqual(m.secret(), "p")
 
-    def test_load_missing_file_exits(self):
-        with self.assertRaises(SystemExit):
-            ipmitui.load_config(Path("/nonexistent/bmc/machines.toml"))
+    def test_load_missing_file_is_empty_not_error(self):
+        # A missing config is no longer fatal: it loads as an empty
+        # fleet so a first run can still come up.
+        cfg = ipmitui.load_config(Path("/nonexistent/bmc/ipmitui.toml"))
+        self.assertEqual(cfg.machines, [])
+        self.assertEqual(cfg.defaults, {})
+
+    def test_ensure_config_creates_starter_then_is_idempotent(self):
+        path = Path(tempfile.mkdtemp()) / "sub" / "ipmitui.toml"
+        self.assertFalse(path.exists())
+        self.assertTrue(ipmitui.ensure_config(path))  # created
+        self.assertTrue(path.exists())
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        # Round-trips as a valid, machine-less config.
+        cfg = ipmitui.load_config(path)
+        self.assertEqual(cfg.machines, [])
+        self.assertFalse(ipmitui.ensure_config(path))  # already there
+
+    def test_default_config_path_prefers_legacy_when_only_it_exists(self):
+        with (
+            mock.patch.object(ipmitui.os, "environ", {}),
+            mock.patch.object(ipmitui, "DEFAULT_CONFIG") as new,
+            mock.patch.object(ipmitui, "LEGACY_CONFIG") as legacy,
+        ):
+            new.exists.return_value = False
+            legacy.exists.return_value = True
+            self.assertIs(ipmitui.default_config_path(), legacy)
+            new.exists.return_value = True
+            self.assertIs(ipmitui.default_config_path(), new)
 
     def test_load_merges_multiple_configs_dedup_primary_wins(self):
         a = _write_cfg('[[machine]]\nname = "m1"\nhost = "h1"\n')

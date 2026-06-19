@@ -4,8 +4,9 @@ Reads a TOML config of machines, shells out to ``ipmitool`` for power
 status + SoL + power operations, runs a Rich-rendered table in either
 one-shot (``ipmitui status``) or auto-refreshing (``ipmitui tui``) mode.
 
-Config: ``~/.config/ipmitui/machines.toml`` by default (override with
-``--config`` or ``IPMITUI_CONFIG``). Shape:
+Config: ``~/.config/ipmitui.toml`` by default (override with
+``--config`` or ``IPMITUI_CONFIG``; a missing default is created on
+first run rather than treated as an error). Shape:
 
     [defaults]
     user = "ADMIN"
@@ -48,9 +49,11 @@ from rich.table import Table
 
 __version__ = "1.0.0"
 
-DEFAULT_CONFIG = Path(
-    os.environ.get("IPMITUI_CONFIG") or "~/.config/ipmitui/machines.toml"
-).expanduser()
+DEFAULT_CONFIG = Path(os.environ.get("IPMITUI_CONFIG") or "~/.config/ipmitui.toml").expanduser()
+# Pre-1.0 layout: a directory holding ``machines.toml``. Still honoured as a
+# fallback when it exists and the new single-file path does not, so an
+# existing setup keeps working without a manual move.
+LEGACY_CONFIG = Path("~/.config/ipmitui/machines.toml").expanduser()
 DEFAULT_INTERVAL = 5.0
 DEFAULT_WORKERS = 8
 IPMITOOL_TIMEOUT = 5  # per-call wall clock cap, seconds
@@ -123,11 +126,11 @@ class Config:
 
 def _load_one(path: Path) -> Config:
     if not path.exists():
-        raise SystemExit(
-            f"ipmitui: config not found: {path}\n"
-            f"create it with the shape documented in ``ipmitui --help`` "
-            "(or ``$IPMITUI_CONFIG`` / ``--config <path>`` to point elsewhere)."
-        )
+        # A missing config is not an error. The primary path is
+        # ``ensure_config``'d (an empty starter file is created) before
+        # we get here; a missing secondary ``--config`` simply
+        # contributes no machines to the merged view.
+        return Config(machines=[], defaults={}, glyphs=True)
     data = tomllib.loads(path.read_text(encoding="utf-8"))
     defaults: dict = data.get("defaults", {})
     glyphs = bool(data.get("ui", {}).get("glyphs", True))
@@ -215,6 +218,53 @@ def save_config(
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(tomli_w.dumps(body), encoding="utf-8")
     path.chmod(0o600)
+
+
+_NEW_CONFIG_TEMPLATE = """\
+# ipmitui configuration. Add machines below (or with "a" in the TUI); see
+# `ipmitui --help` for the full shape.
+#
+# [defaults]
+# user = "ADMIN"
+# pass_cmd = "pass show lab/{name}-bmc"   # {name} -> the machine's name
+#
+# [[machine]]
+# name = "lab-01"
+# host = "10.20.30.10"
+# description = "headend BMC, warp rack"
+
+[ui]
+glyphs = true
+"""
+
+
+def ensure_config(path: Path) -> bool:
+    """Create an empty starter config at ``path`` if it is missing.
+
+    Returns True when a file was created, so the caller can tell the
+    operator where it landed. A first run thus opens an empty but
+    working surface (with a notification) instead of exiting with an
+    error. The file is chmod 600 because it may grow plaintext
+    passwords.
+    """
+    if path.exists():
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(_NEW_CONFIG_TEMPLATE, encoding="utf-8")
+    path.chmod(0o600)
+    return True
+
+
+def default_config_path() -> Path:
+    """Config path to use when none is given on the CLI. Prefers the env
+    override / new ``~/.config/ipmitui.toml``; falls back to the legacy
+    ``~/.config/ipmitui/machines.toml`` only when that is the file that
+    actually exists, so pre-1.0 setups keep working untouched."""
+    if "IPMITUI_CONFIG" in os.environ:
+        return DEFAULT_CONFIG
+    if not DEFAULT_CONFIG.exists() and LEGACY_CONFIG.exists():
+        return LEGACY_CONFIG
+    return DEFAULT_CONFIG
 
 
 def find_machine(machines: list[Machine], name: str) -> Machine:
@@ -372,17 +422,21 @@ def cmd_tui(
     workers: int,
     interval: float,
     console: Console,
+    created_path: Path | None = None,
 ) -> int:
     """Interactive operator surface: filter, select, drop into SoL,
     fire a power op, CRUD-edit the machines list without leaving the
     keyboard. Threads ``config_path`` down so save-on-edit can
-    round-trip to the right file. Imports textual lazily so
-    ``ipmitui status`` / ``ipmitui check`` keep their rich-only dep
-    footprint."""
+    round-trip to the right file. ``created_path`` is set when this run
+    just created the config, so the TUI can say where. Imports textual
+    lazily so ``ipmitui status`` / ``ipmitui check`` keep their
+    rich-only dep footprint."""
     del console  # textual owns the terminal end-to-end
     from ipmitui._tui import run_tui
 
-    return run_tui(config, config_path, workers=workers, interval=interval)
+    return run_tui(
+        config, config_path, workers=workers, interval=interval, created_path=created_path
+    )
 
 
 def cmd_check(machines: list[Machine], workers: int, console: Console) -> int:
@@ -493,18 +547,32 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
-    configs = args.config or [DEFAULT_CONFIG]
+    configs = args.config or [default_config_path()]
+    # Create the primary config if it does not exist yet rather than
+    # erroring out, so a fresh install lands in a working surface.
+    created = ensure_config(configs[0])
     config = load_config(configs)
     machines = config.machines
     console = Console()
 
     cmd = args.cmd or "tui"
+    if created and cmd != "tui":
+        # The TUI surfaces this as a notification; for the CLI commands
+        # say it on stderr so stdout (the table) stays clean for piping.
+        print(f"ipmitui: created config {configs[0]}", file=sys.stderr)
     if cmd == "tui":
         # tui needs the full Config so save_config can preserve the
         # operator's ``[defaults]`` / ``[ui]`` blocks. CRUD writes back
         # to the primary (first) config; with several --config files
         # this merges edits there, so grouping is best kept read-only.
-        return cmd_tui(config, configs[0], args.workers, args.interval, console)
+        return cmd_tui(
+            config,
+            configs[0],
+            args.workers,
+            args.interval,
+            console,
+            created_path=configs[0] if created else None,
+        )
     if cmd == "status":
         return cmd_status(machines, args.workers, console)
     if cmd == "check":
@@ -524,4 +592,13 @@ def main(argv: list[str] | None = None) -> int:
     return 1
 
 
-__all__ = ["__version__", "Config", "Machine", "Probe", "main", "save_config"]
+__all__ = [
+    "__version__",
+    "Config",
+    "Machine",
+    "Probe",
+    "default_config_path",
+    "ensure_config",
+    "main",
+    "save_config",
+]
