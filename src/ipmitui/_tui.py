@@ -338,12 +338,16 @@ class IpmituiApp(App[None]):
         config_path: Path,
         workers: int = DEFAULT_WORKERS,
         interval: float = DEFAULT_INTERVAL,
+        created_path: Path | None = None,
     ) -> None:
         super().__init__()
         # Mutable list: CRUD operations splice in place + save back
         # to ``config_path``. ``_config_defaults`` round-trips the
         # operator's ``[defaults]`` block on every save.
         self._machines: list[Machine] = list(config.machines)
+        # Set when this run created the config; on_mount tells the
+        # operator where it landed instead of failing on a missing file.
+        self._created_path = created_path
         self._config_defaults: dict = dict(config.defaults)
         self._config_path = config_path
         # Nerd Font glyphs on/off (``[ui].glyphs``); toggled at runtime
@@ -444,6 +448,14 @@ class IpmituiApp(App[None]):
         # Tick the relative "refreshed Ns ago" label once a second so
         # it counts up between scans without waiting for the next probe.
         self.set_interval(1.0, self._refresh_status, name="age")
+        # First run with no config: say where we created it (the file is
+        # empty, so the table is too) rather than having failed to start.
+        if self._created_path is not None:
+            self.notify(
+                f"created {self._created_path}\nno machines yet; press a to add one",
+                title="first run",
+                timeout=10,
+            )
 
     # ----- focus styling ---------------------------------------------------
 
@@ -1026,6 +1038,7 @@ def run_tui(
     config_path: Path,
     workers: int = DEFAULT_WORKERS,
     interval: float = DEFAULT_INTERVAL,
+    created_path: Path | None = None,
 ) -> int:
     """Entry point used by ``ipmitui tui``. SoL handoff happens
     inline via ``App.suspend()``, so this function just runs the
@@ -1036,5 +1049,7 @@ def run_tui(
     click-drag text selection / copy, which operators find annoying.
     With it off the driver writes no mouse escape sequences (the
     SoL suspend/resume mouse toggles become no-ops too)."""
-    IpmituiApp(config, config_path, workers=workers, interval=interval).run(mouse=False)
+    IpmituiApp(
+        config, config_path, workers=workers, interval=interval, created_path=created_path
+    ).run(mouse=False)
     return 0

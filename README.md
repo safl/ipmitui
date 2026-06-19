@@ -25,9 +25,12 @@ Requires `ipmitool` on `$PATH` (`apt install ipmitool` on Debian / Ubuntu).
 
 ## Config
 
-Default path: `~/.config/ipmitui/machines.toml` (override with `--config` or
-`$IPMITUI_CONFIG`). The file is written `0600` because passwords may be
-plaintext.
+Default path: `~/.config/ipmitui.toml` (override with `--config` or
+`$IPMITUI_CONFIG`). If it does not exist yet it is created on first run (the
+TUI says where) rather than erroring out, so you can start empty and add
+machines with `a`. The legacy `~/.config/ipmitui/machines.toml` is still
+read when it is the file that exists. The file is written `0600` because
+passwords may be plaintext.
 
 ```toml
 [defaults]
